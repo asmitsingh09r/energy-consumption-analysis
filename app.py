@@ -1,92 +1,192 @@
-"""Interactive dashboard for synthetic energy consumption data."""
+"""Interactive dashboard for the energy analysis project."""
 
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from src.analysis import (
+    calculate_kpis,
+    daily_summary,
+    detect_anomalies,
+    hourly_summary,
+    monthly_summary,
+    peak_usage_periods,
+    weekday_weekend_summary,
+    weekly_summary,
+)
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_FILE = PROJECT_DIR / "data" / "raw" / "energy_consumption.csv"
+OUTPUT_DIR = PROJECT_DIR / "outputs"
 
 st.set_page_config(page_title="Energy Consumption Analysis", layout="wide")
 st.title("Energy Consumption Analysis")
-st.caption("Practice dashboard using synthetic data, not real meter readings.")
-
+st.caption(
+    "Practice dashboard using synthetic data; readings do not represent "
+    "a real building or facility."
+)
 
 if not DATA_FILE.exists():
-    st.error(f"Dataset not found: {DATA_FILE}")
-    st.info("Run `python generate_sample_data.py` from the project folder first.")
+    st.error("Dataset not found. Check that data/raw/energy_consumption.csv exists.")
     st.stop()
 
-data = pd.read_csv(DATA_FILE)
+raw_data = pd.read_csv(DATA_FILE)
 
-required_columns = [
-    "Date",
-    "Time",
-    "Energy_Usage_kWh",
-    "Is_Unusual_Reading",
-]
-missing_columns = [
-    column for column in required_columns if column not in data.columns
-]
-
-if missing_columns:
-    st.error(f"CSV is missing these columns: {', '.join(missing_columns)}")
+try:
+    data = detect_anomalies(raw_data)
+except (ValueError, KeyError) as error:
+    st.error(f"Could not prepare the dataset: {error}")
     st.stop()
 
-data["Energy_Usage_kWh"] = pd.to_numeric(
-    data["Energy_Usage_kWh"], errors="coerce"
+kpis = calculate_kpis(data)
+monthly = monthly_summary(data)
+weekly = weekly_summary(data)
+daily = daily_summary(data)
+day_comparison = weekday_weekend_summary(data)
+hourly = hourly_summary(data)
+peaks = peak_usage_periods(data)
+anomalies = data[data["Anomaly"] == "Anomaly"]
+
+st.subheader("Key statistics")
+metric_columns = st.columns(5)
+metric_columns[0].metric("Total usage", f"{kpis['total_kWh']:,.1f} kWh")
+metric_columns[1].metric("Average per hour", f"{kpis['average_kWh']:.2f} kWh")
+metric_columns[2].metric("Median per hour", f"{kpis['median_kWh']:.2f} kWh")
+metric_columns[3].metric("Peak reading", f"{kpis['maximum_kWh']:.2f} kWh")
+metric_columns[4].metric("Z-score anomalies", len(anomalies))
+
+summary_tab, patterns_tab, anomaly_tab, charts_tab, records_tab = st.tabs(
+    ["Summaries", "Usage patterns", "Anomalies", "Matplotlib charts", "Readings"]
 )
-data["Timestamp"] = pd.to_datetime(
-    data["Date"].astype(str) + " " + data["Time"].astype(str),
-    errors="coerce",
-)
-data["Is_Unusual_Reading"] = (
-    data["Is_Unusual_Reading"].astype(str).str.lower() == "true"
-)
-data = data.dropna(subset=["Timestamp", "Energy_Usage_kWh"])
 
-if data.empty:
-    st.error("The CSV does not contain any usable energy readings.")
-    st.stop()
+with summary_tab:
+    st.subheader("Peak usage periods")
+    for label, value in peaks.items():
+        st.write(f"**{label.replace('_', ' ').title()}:** {value}")
 
-total_usage = data["Energy_Usage_kWh"].sum()
-average_usage = data["Energy_Usage_kWh"].mean()
-peak_usage = data["Energy_Usage_kWh"].max()
-unusual_count = int(data["Is_Unusual_Reading"].sum())
+    st.subheader("Daily summary")
+    st.dataframe(daily, hide_index=True)
 
-metric_columns = st.columns(4)
-metric_columns[0].metric("Total usage", f"{total_usage:,.1f} kWh")
-metric_columns[1].metric("Average per hour", f"{average_usage:.2f} kWh")
-metric_columns[2].metric("Peak hourly usage", f"{peak_usage:.2f} kWh")
-metric_columns[3].metric("Flagged readings", unusual_count)
+    st.subheader("Weekly summary")
+    st.dataframe(weekly, hide_index=True)
 
-st.subheader("Hourly energy usage")
-hourly_chart = data.set_index("Timestamp")[["Energy_Usage_kWh"]]
-st.line_chart(hourly_chart, y="Energy_Usage_kWh")
+    st.subheader("Monthly summary")
+    st.dataframe(monthly, hide_index=True)
 
-st.subheader("Daily energy consumption")
-daily_data = (
-    data.groupby(data["Timestamp"].dt.date)["Energy_Usage_kWh"]
-    .sum()
-    .rename("Daily_kWh")
-    .rename_axis("Date")
-    .reset_index()
-)
-st.bar_chart(daily_data, x="Date", y="Daily_kWh")
+    st.subheader("Weekday versus weekend")
+    st.dataframe(day_comparison, hide_index=True)
 
-st.subheader("Flagged unusual readings")
-unusual_data = data[data["Is_Unusual_Reading"]].copy()
-if unusual_data.empty:
-    st.write("No readings are flagged.")
-else:
+    if "Tariff_Per_Unit" in data.columns:
+        tariff = pd.to_numeric(data["Tariff_Per_Unit"], errors="coerce")
+        cost_data = data.assign(
+            Estimated_Cost=data["Energy_Usage_kWh"] * tariff
+        )
+        monthly_cost = (
+            cost_data.groupby("Month")["Estimated_Cost"]
+            .sum()
+            .rename("Estimated_Cost")
+            .reset_index()
+        )
+        st.subheader("Estimated energy cost by month")
+        st.bar_chart(monthly_cost, x="Month", y="Estimated_Cost")
+
+with patterns_tab:
+    st.subheader("Hourly energy usage and 7-day rolling average")
+    time_chart = data.set_index("Timestamp")[
+        ["Energy_Usage_kWh", "Rolling_7_Day"]
+    ]
+    st.line_chart(time_chart)
+
+    st.subheader("Monthly total usage")
+    st.bar_chart(monthly, x="Month", y="Total_kWh")
+
+    st.subheader("Monthly average usage")
+    st.bar_chart(monthly, x="Month", y="Average_kWh")
+
+    st.subheader("Average usage by hour")
+    st.bar_chart(hourly, x="Hour", y="Average_kWh")
+
+    st.subheader("Weekday versus weekend average usage")
+    st.bar_chart(day_comparison, x="Day_Type", y="Average_kWh")
+
+    if "Temperature" in data.columns:
+        temperature_data = data.copy()
+        temperature_data["Temperature"] = pd.to_numeric(
+            temperature_data["Temperature"], errors="coerce"
+        )
+        temperature_data = temperature_data.dropna(
+            subset=["Temperature", "Energy_Usage_kWh"]
+        )
+        st.subheader("Temperature versus energy usage")
+        st.scatter_chart(
+            temperature_data,
+            x="Temperature",
+            y="Energy_Usage_kWh",
+        )
+
+with anomaly_tab:
+    st.write(
+        "A reading is flagged when its absolute z-score is greater than 3. "
+        "An anomaly is unusual and should be investigated; it is not "
+        "automatically an error."
+    )
+
+    st.subheader(f"Statistical anomalies ({len(anomalies)})")
     st.dataframe(
-        unusual_data[
-            ["Date", "Time", "Energy_Usage_kWh", "Is_Unusual_Reading"]
+        anomalies[
+            ["Timestamp", "Energy_Usage_kWh", "Z_Score", "Anomaly"]
         ],
         hide_index=True,
     )
 
-with st.expander("View all readings"):
+    st.subheader("Anomaly count by month")
+    st.bar_chart(monthly, x="Month", y="Anomaly_Count")
+
+    st.subheader("Anomalies over time")
+    st.scatter_chart(
+        anomalies,
+        x="Timestamp",
+        y="Energy_Usage_kWh",
+        color="Anomaly",
+    )
+
+with charts_tab:
+    st.write("The following Matplotlib charts were generated by `main.py`.")
+    chart_files = [
+        "01_energy_over_time.png",
+        "02_rolling_average.png",
+        "03_monthly_total.png",
+        "04_monthly_average.png",
+        "05_average_by_hour.png",
+        "06_weekday_vs_weekend.png",
+        "07_usage_distribution.png",
+        "08_temperature_vs_usage.png",
+        "09_anomalies_over_time.png",
+        "10_anomalies_by_month.png",
+    ]
+
+    for chart_file in chart_files:
+        chart_path = OUTPUT_DIR / chart_file
+        if chart_path.exists():
+            st.image(str(chart_path), caption=chart_file)
+        else:
+            st.warning(
+                f"{chart_file} is missing. Run `python main.py` and publish "
+                "the updated outputs folder."
+            )
+
+with records_tab:
+    st.subheader("All readings")
     st.dataframe(data, hide_index=True)
+
+    quality_path = OUTPUT_DIR / "data_quality_summary.txt"
+    if quality_path.exists():
+        st.subheader("Data quality checks")
+        st.text(quality_path.read_text(encoding="utf-8"))
+
+    report_path = OUTPUT_DIR / "energy_summary_report.txt"
+    if report_path.exists():
+        st.subheader("Written findings and report")
+        st.text(report_path.read_text(encoding="utf-8"))
