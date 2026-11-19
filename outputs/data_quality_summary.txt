@@ -1,0 +1,11 @@
+DATA QUALITY CHECKS
+Invalid timestamps: 0
+Missing or non-numeric energy values: 0
+Duplicate meter timestamps: 0
+Negative energy readings: 0
+Missing hourly intervals: 0
+
+Invalid timestamp or energy rows are dropped during preparation.
+Duplicate meter timestamps keep their first reading.
+Negative readings are retained for investigation.
+Missing hourly intervals are counted, not filled in.
